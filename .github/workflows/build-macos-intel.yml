@@ -1,0 +1,152 @@
+name: Build K4B Mac App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-intel:
+    name: Build Intel macOS app
+    runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      APP_NAME: "K4B Special Event Logger"
+      OUTPUT_ZIP: "K4B_Special_Event_Logger_v2.0.4_macOS_Intel.zip"
+      PYINSTALLER_VERSION: "6.22.3"
+
+    steps:
+      - name: Check out K4B source
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13 x64
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          architecture: "x64"
+
+      - name: Record build environment
+        shell: bash
+        run: |
+          {
+            echo "K4B Special Event Logger 2.0.4 - GitHub macOS Intel build"
+            echo "=========================================================="
+            echo
+            echo "Runner architecture: $(uname -m)"
+            sw_vers
+            echo
+            python --version
+            python -c 'import platform; print("Python architecture:", platform.machine())'
+          } | tee BUILD_INSPECTION.txt
+
+      - name: Verify Tkinter is available
+        shell: bash
+        run: |
+          python - <<'PY' | tee -a BUILD_INSPECTION.txt
+          import tkinter
+          print("Tkinter import: OK")
+          print("Tk version:", tkinter.TkVersion)
+          PY
+
+      - name: Compile-check Python source
+        shell: bash
+        run: |
+          python -m compileall -q \
+            adif_export.py adif_import.py logger_screen.py main.py pota_utils.py \
+            run_logger.py setup_screen.py storage.py tooltips.py
+          echo "Python compile check: PASS" | tee -a BUILD_INSPECTION.txt
+
+      - name: Install pinned PyInstaller
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --index-url https://pypi.org/simple \
+            "pyinstaller==${PYINSTALLER_VERSION}"
+          python -m PyInstaller --version | sed 's/^/PyInstaller version: /' | tee -a BUILD_INSPECTION.txt
+
+      - name: Build K4B .app
+        shell: bash
+        run: |
+          rm -rf build dist "${APP_NAME}.spec"
+          python -m PyInstaller \
+            --noconfirm \
+            --clean \
+            --onedir \
+            --windowed \
+            --target-arch x86_64 \
+            --osx-bundle-identifier "com.n2cua.k4bspecialeventlogger" \
+            --name "${APP_NAME}" \
+            --add-data "LICENSE.txt:." \
+            run_logger.py
+
+      - name: Verify application bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/${APP_NAME}.app"
+          EXE="${APP}/Contents/MacOS/${APP_NAME}"
+          test -d "$APP"
+          test -f "$APP/Contents/Info.plist"
+          test -x "$EXE"
+
+          {
+            echo
+            echo "Application bundle checks"
+            echo "-------------------------"
+            echo "Bundle exists: PASS"
+            echo "Info.plist exists: PASS"
+            echo "Executable exists: PASS"
+            echo
+            echo "Executable format:"
+            /usr/bin/file "$EXE"
+            echo
+            echo "Bundle identifier:"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist"
+            echo
+            echo "Bundle executable:"
+            /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist"
+            echo
+            echo "Mach-O build/version information:"
+            /usr/bin/otool -l "$EXE" | awk '
+              /LC_BUILD_VERSION/ {show=1; count=0}
+              show {print; count++}
+              show && count>=8 {show=0}
+              /LC_VERSION_MIN_MACOSX/ {show2=1; count2=0}
+              show2 {print; count2++}
+              show2 && count2>=6 {show2=0}
+            '
+            echo
+            echo "Top-level bundle contents:"
+            find "$APP/Contents" -maxdepth 2 -print | sort
+          } | tee -a BUILD_INSPECTION.txt
+
+      - name: Ad-hoc sign and verify bundle integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/${APP_NAME}.app"
+          /usr/bin/codesign --force --deep --sign - "$APP"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a BUILD_INSPECTION.txt
+          echo "Ad-hoc code-sign verification: PASS" | tee -a BUILD_INSPECTION.txt
+
+      - name: Package finished Mac app
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/${APP_NAME}.app"
+          rm -f "dist/${OUTPUT_ZIP}"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/${OUTPUT_ZIP}"
+          (cd dist && /usr/bin/shasum -a 256 "${OUTPUT_ZIP}") | tee BUILD_SHA256.txt
+          cat BUILD_SHA256.txt >> BUILD_INSPECTION.txt
+          echo "Packaged ZIP: dist/${OUTPUT_ZIP}" | tee -a BUILD_INSPECTION.txt
+
+      - name: Upload Mac build for download
+        uses: actions/upload-artifact@v7
+        with:
+          name: K4B-Special-Event-Logger-macOS-Intel
+          path: |
+            dist/K4B_Special_Event_Logger_v2.0.4_macOS_Intel.zip
+            BUILD_INSPECTION.txt
+            BUILD_SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
